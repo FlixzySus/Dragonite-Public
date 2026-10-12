@@ -1,3 +1,7 @@
-docker-compose.yml
+/docker-compose.yml
 admin/admin*
 dragonite/dragonite*
+docker/.env
+docker/dragonite/config.toml
+docker/dragonite/logs/
+docker/mariadb/

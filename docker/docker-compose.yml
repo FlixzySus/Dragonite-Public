@@ -1,0 +1,76 @@
+
+# Dragonite + Admin + MariaDB for Docker Desktop (Windows / macOS / Linux).
+#
+# First run:  copy .env.example -> .env and dragonite/config.toml.example -> dragonite/config.toml
+#             (or just run ./setup.ps1 on Windows, which does this for you and generates secrets)
+# Start:      docker compose up -d
+# Logs:       docker compose logs -f dragonite
+# Update:     docker compose pull && docker compose up -d
+
+services:
+  mariadb:
+    image: mariadb:11
+    container_name: dragonite-mariadb
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+      MARIADB_DATABASE: ${DB_NAME:-dragonite}
+      MARIADB_USER: ${DB_USER:-dragonite}
+      MARIADB_PASSWORD: ${DB_PASSWORD}
+    command:
+      - --max-connections=500
+      - --innodb-buffer-pool-size=512M
+    volumes:
+      - ./mariadb/data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    # Uncomment to reach the DB from tools on the host (HeidiSQL, DBeaver, ...)
+    # ports:
+    #   - "3306:3306"
+
+  dragonite:
+    image: ghcr.io/unownhash/dragonite-public:latest
+    container_name: dragonite
+    restart: unless-stopped
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    volumes:
+      - type: bind
+        source: ./dragonite/config.toml
+        target: /dragonite/config.toml
+      - type: bind
+        source: ./dragonite/logs
+        target: /dragonite/logs
+    ports:
+      - "${DRAGONITE_PORT:-7272}:7272"
+    extra_hosts:
+      # lets config.toml point at services running directly on the host via host.docker.internal
+      - "host.docker.internal:host-gateway"
+
+  admin:
+    image: ghcr.io/unownhash/dragonite-public-admin:latest
+    container_name: dragonite-admin
+    restart: unless-stopped
+    depends_on:
+      - dragonite
+    environment:
+      - ADMIN.GENERAL.HOST=0.0.0.0
+      - ADMIN.GENERAL.PORT=7273
+      - ADMIN.GENERAL.USERNAME=${ADMIN_USERNAME:-admin}
+      - ADMIN.GENERAL.PASSWORD=${ADMIN_PASSWORD}
+      - ADMIN.GENERAL.LOG_LEVEL=info
+      - ADMIN.GENERAL.API_SECRET=${ADMIN_API_SECRET:-}
+      - ADMIN.GENERAL.JWT_SECRET=${ADMIN_JWT_SECRET}
+
+      - ADMIN.BACKENDS.0.DRAGONITE_ENDPOINT=http://dragonite:7272
+      - ADMIN.BACKENDS.0.GOLBAT_ENDPOINT=${GOLBAT_ENDPOINT:-http://host.docker.internal:9001}
+      - ADMIN.BACKENDS.0.GOLBAT_API_SECRET=${GOLBAT_API_SECRET:-}
+    ports:
+      - "${ADMIN_PORT:-7273}:7273"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

@@ -2,6 +2,11 @@
 
 [Unown# docs](https://unownhash.com/docs/dragonite)
 
+## Setup (Windows / Docker Desktop)
+`run.sh` and the release binaries are Linux/macOS only. On Windows use the
+Docker Compose stack in [`docker/`](docker/README.md) — it includes MariaDB and a
+`setup.ps1` that generates the config and secrets for you.
+
 ## Setup (Non-Docker)
 1. Clone repo
 
