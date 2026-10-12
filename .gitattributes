@@ -1,0 +1,4 @@
+# Keep LF line endings on files that are mounted into Linux containers or run by bash,
+# even when the repo is cloned with core.autocrlf=true on Windows.
+docker/** text eol=lf
+docker/*.ps1 text eol=crlf

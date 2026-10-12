@@ -1,0 +1,29 @@
+{
+  "deviceListener": {
+    "port": 7070,
+    "secret": ""
+  },
+  "controllerListener": {
+    "port": 7071,
+    "secret": ""
+  },
+  "client": {
+    "port": 7072,
+    "host": "0.0.0.0"
+  },
+  "logging": {
+    "save": true,
+    "maxSize": 100,
+    "maxAge": 14,
+    "level": "info",
+    "consoleStatus": false
+  },
+  "monitor": {
+    "enabled": true,
+    "reboot": false,
+    "minMemory": 30000,
+    "maxMemStartMultiple": 2,
+    "maxMemStartMultipleOverwrite": { "atv": 15, "iphone": 7 },
+    "deviceCooldown": 25
+  }
+}

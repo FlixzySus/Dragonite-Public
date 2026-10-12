@@ -1,0 +1,91 @@
+# Golbat config for the Docker Compose stack in ../docker-compose.yml
+# Based on https://github.com/UnownHash/Golbat/blob/main/config.toml.example
+#
+# setup.ps1 copies this file to config.toml and replaces every double-underscore placeholder
+# (e.g. __DB_PASSWORD__) with the matching value from .env. If you copy it by hand, fill those in.
+#
+# Differences from upstream: database host is the "mariadb" service, Koji is the "koji" service,
+# secrets come from .env, the example webhook is commented out (add your own consumers below).
+
+port = 9001             # Listening port for golbat
+grpc_port = 50001       # Listening port for grpc (raw ingest from dragonite + GolbatApi)
+raw_bearer = "__GOLBAT_RAW_BEARER__"   # Raw bearer (password) required - must match dragonite golbat_raw_bearer
+api_secret = "__GOLBAT_API_SECRET__"   # Golbat secret required on api calls - must match dragonite / admin / maps
+api_docs = true         # Serve interactive API docs at /docs (+ /openapi.json, /schemas); never requires the api secret
+
+pokemon_memory_only = true  # Use in-memory storage for pokemon only
+#preserve_pokemon = false   # Save pokemon to DB on shutdown, restore on startup (for memory-only mode)
+store_username = false
+preload = false         # Pre-load objects into cache on startup (faster initial responses, slower startup)
+fort_in_memory = false  # Keep forts in memory for api lookups [experimental]
+
+[koji]
+# Golbat loads the geofences of this Koji project (create it in the Koji UI, name must match)
+url = "http://koji:8080/api/v1/geofence/feature-collection/__KOJI_GOLBAT_PROJECT__"
+bearer_token = "__KOJI_SECRET__"
+
+[cleanup]
+pokemon = true                  # Keep pokemon table nice and short
+incidents = true                # Remove incidents after expiry
+station_battles = true          # Remove station battles after expiry
+quests = true                   # Remove quests after expiry
+tappables = true                # Remove tappables after expiry
+stats = true                    # Enable/Disable stats history
+stats_days = 7                  # Remove stats entries after x days
+device_hours = 24               # Remove devices from in memory after not seen for x hours
+forts_stale_threshold = 3600    # Seconds before a fort is considered stale (default: 1 hour)
+
+[logging]
+debug = false
+api_request_logging = false
+save_logs = true
+max_size = 50                   # Size in MB
+max_backups = 10                # Amount of files to keep
+max_age = 30                    # Day(s) to keep files
+compress = true                 # Compress to gz archive
+
+[database]
+user = "__DB_USER__"
+password = "__DB_PASSWORD__"
+address = "mariadb:3306"
+db = "__GOLBAT_DB_NAME__"
+max_pool = 100                  # Maximum database connection pool size
+
+[pvp]
+enabled = true
+include_hundos_under_cap = false
+level_caps = [50, 51]           # Level caps used in PVP rankings
+
+# you can enable prometheus by uncommenting this section
+#[prometheus]
+#enabled = true
+
+# Webhook consumers (Poracle, ReactMap, ...). Repeat the [[webhooks]] block per destination.
+# A service running directly on the Windows host is reachable as host.docker.internal.
+#[[webhooks]]
+#url = "http://host.docker.internal:4201"
+#types = ["pokemon", "pokemon_iv", "pokemon_no_iv", "gym", "invasion", "quest", "pokestop", "raid", "weather", "fort_update", "max_battle"]
+
+[tuning]
+max_pokemon_distance = 100  # Maximum distance in kilometers for searching pokemon
+max_pokemon_results = 3000  # Maximum number of pokemon to return
+max_fort_results = 9000     # Maximum number of forts to return per in-memory scan
+extended_timeout = false
+write_behind_startup_delay = 120
+write_behind_worker_count = 16
+write_behind_batch_size = 50
+write_behind_batch_timeout = 100
+profile_routes = false
+profile_contention = false
+s2_cell_lookup = false
+reduce_updates = false
+
+[weather]
+proactive_iv_switching = true
+proactive_iv_switching_to_db = false
+
+# Scan rules allow controlling which game objects are processed based on area or scanner context.
+# See upstream config.toml.example for details.
+#[[scan_rules]]
+#areas = ["MainArea"]
+#nearby_pokemon = false

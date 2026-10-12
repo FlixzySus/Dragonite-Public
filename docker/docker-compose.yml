@@ -1,0 +1,163 @@
+
+# Unown# scanner stack for Docker Desktop (Windows / macOS / Linux), following
+# https://unownhash.com/docs/setup/docker and https://unownhash.com/docs/other/database
+#
+#   mariadb  - MariaDB 10.11 (docs: 10.6+ recommended), three databases: dragonite, golbat, koji
+#   rotom    - device controller: devices -> :7070, controllers -> :7071, web UI :7072
+#   golbat   - data processor, HTTP API :9001, gRPC raw ingest :50001
+#   koji     - geofence / area manager, web UI :8080
+#   dragonite + admin - scanner controller (:7272) and its web UI (:7273)
+#
+# First run:  .\setup.ps1      (creates .env + all config files with generated secrets, then starts)
+# Verify:     .\check.ps1      (database, migrations, services, ports)
+# Logs:       docker compose logs -f dragonite
+# Update:     .\setup.ps1 -Update
+#
+# Containers reach each other by service name (mariadb, rotom, golbat, koji, dragonite) on the
+# "scanner" network. Other compose projects (ReactMap, Poracle, ...) can join that network by name.
+
+services:
+  mariadb:
+    image: mariadb:10.11
+    container_name: mariadb
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+      MARIADB_DATABASE: ${DB_NAME:-dragonite}
+      MARIADB_USER: ${DB_USER:-dragonite}
+      MARIADB_PASSWORD: ${DB_PASSWORD}
+      # extra databases created by mariadb/init/01-create-databases.sh on first start
+      GOLBAT_DB_NAME: ${GOLBAT_DB_NAME:-golbat}
+      KOJI_DB_NAME: ${KOJI_DB_NAME:-koji}
+    # Server flags from the Unown# database docs, plus sizing. (The docs also pass
+    # --default-authentication-plugin; that is a MySQL option, MariaDB already uses
+    # mysql_native_password for these users.)
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --binlog-expire-logs-seconds=86400
+      - --max-connections=500
+      - --innodb-buffer-pool-size=${DB_BUFFER_POOL:-1G}
+    volumes:
+      # Named volume, NOT a bind mount: InnoDB on a Windows-shared folder fails with
+      # "Got error N from storage engine" during ALTER TABLE (Koji migrations, Golbat schema).
+      - mariadb_data:/var/lib/mysql
+      - ./mariadb/init:/docker-entrypoint-initdb.d:ro
+      # Optional tuning file, see "Optimizing MariaDB" in the Unown# database docs:
+      # - ./mariadb/my.cnf:/etc/mysql/conf.d/my.cnf:ro
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    # Uncomment to reach the DB from tools on the host (HeidiSQL, DBeaver, TablePlus, ...)
+    # ports:
+    #   - "3306:3306"
+
+  rotom:
+    image: ghcr.io/unownhash/rotom:main
+    container_name: rotom
+    restart: unless-stopped
+    volumes:
+      - type: bind
+        source: ./rotom/config/local.json
+        target: /rotom/config/local.json
+      - ./rotom/logs:/rotom/logs
+      - ./rotom/jobs:/rotom/jobs
+    ports:
+      - "${ROTOM_DEVICE_PORT:-7070}:7070"      # phones / MITM clients connect here
+      - "${ROTOM_CONTROLLER_PORT:-7071}:7071"  # controllers (dragonite); exposed for non-docker controllers
+      - "${ROTOM_UI_PORT:-7072}:7072"          # web UI (no auth - keep on your LAN)
+
+  golbat:
+    image: ghcr.io/unownhash/golbat:main
+    container_name: golbat
+    restart: unless-stopped
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    volumes:
+      - type: bind
+        source: ./golbat/config.toml
+        target: /golbat/config.toml
+      - ./golbat/cache:/golbat/cache
+      - ./golbat/logs:/golbat/logs
+    ports:
+      - "${GOLBAT_PORT:-9001}:9001"            # HTTP API + raw endpoint (maps, Koji, admin)
+      - "${GOLBAT_GRPC_PORT:-50001}:50001"     # gRPC raw ingest (dragonite uses this internally)
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  koji:
+    image: ghcr.io/turtiesocks/koji:main
+    container_name: koji
+    restart: unless-stopped
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      golbat:
+        condition: service_started
+    environment:
+      # Golbat database (forts / spawnpoints used for routing & clustering)
+      SCANNER_DB_URL: 'mysql://${DB_USER:-dragonite}:${DB_PASSWORD}@mariadb:3306/${GOLBAT_DB_NAME:-golbat}'
+      # Dragonite database
+      CONTROLLER_DB_URL: 'mysql://${DB_USER:-dragonite}:${DB_PASSWORD}@mariadb:3306/${DB_NAME:-dragonite}'
+      # Koji's own database
+      KOJI_DB_URL: 'mysql://${DB_USER:-dragonite}:${DB_PASSWORD}@mariadb:3306/${KOJI_DB_NAME:-koji}'
+      KOJI_SECRET: '${KOJI_SECRET}'
+      MAX_CONNECTIONS: 100
+      START_LAT: '${KOJI_START_LAT:-0}'
+      START_LON: '${KOJI_START_LON:-0}'
+      LOG_LEVEL: info
+    ports:
+      - "${KOJI_PORT:-8080}:8080"
+
+  dragonite:
+    image: ghcr.io/unownhash/dragonite-public:latest
+    container_name: dragonite
+    restart: unless-stopped
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      rotom:
+        condition: service_started
+      golbat:
+        condition: service_started
+    volumes:
+      - type: bind
+        source: ./dragonite/config.toml
+        target: /dragonite/config.toml
+      - ./dragonite/logs:/dragonite/logs
+    ports:
+      - "${DRAGONITE_PORT:-7272}:7272"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  admin:
+    image: ghcr.io/unownhash/dragonite-public-admin:latest
+    container_name: dragonite-admin
+    restart: unless-stopped
+    depends_on:
+      - dragonite
+    environment:
+      - ADMIN.GENERAL.HOST=0.0.0.0
+      - ADMIN.GENERAL.PORT=7273
+      - ADMIN.GENERAL.USERNAME=${ADMIN_USERNAME:-admin}
+      - ADMIN.GENERAL.PASSWORD=${ADMIN_PASSWORD}
+      - ADMIN.GENERAL.LOG_LEVEL=info
+      - ADMIN.GENERAL.API_SECRET=${ADMIN_API_SECRET:-}
+      - ADMIN.GENERAL.JWT_SECRET=${ADMIN_JWT_SECRET}
+
+      - ADMIN.BACKENDS.0.DRAGONITE_ENDPOINT=http://dragonite:7272
+      - ADMIN.BACKENDS.0.GOLBAT_ENDPOINT=http://golbat:9001
+      - ADMIN.BACKENDS.0.GOLBAT_API_SECRET=${GOLBAT_API_SECRET}
+    ports:
+      - "${ADMIN_PORT:-7273}:7273"
+
+volumes:
+  mariadb_data:
+
+networks:
+  default:
+    name: scanner

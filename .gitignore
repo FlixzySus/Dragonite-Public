@@ -1,3 +1,12 @@
-docker-compose.yml
+/docker-compose.yml
 admin/admin*
 dragonite/dragonite*
+docker/.env
+docker/dragonite/config.toml
+docker/dragonite/logs/
+docker/golbat/cache/
+docker/golbat/logs/
+docker/golbat/config.toml
+docker/rotom/logs/
+docker/rotom/jobs/
+docker/rotom/config/local.json
