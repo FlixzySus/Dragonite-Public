@@ -156,9 +156,20 @@ $kojiPort   = Get-Or $dotenv.KOJI_PORT '8080'
 $rotomPort  = Get-Or $dotenv.ROTOM_UI_PORT '7072'
 $devicePort = Get-Or $dotenv.ROTOM_DEVICE_PORT '7070'
 $golbatPort = Get-Or $dotenv.GOLBAT_PORT '9001'
-$lanIp = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-          Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' -and $_.PrefixOrigin -ne 'WellKnown' } |
-          Select-Object -First 1 -ExpandProperty IPAddress)
+# The adapter that carries the default route is the real LAN one; the first IPv4 on the box
+# is often the WSL / Hyper-V virtual switch (172.x), which phones cannot reach.
+$lanIp = $null
+try {
+    $ifIndex = (Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction Stop |
+                Sort-Object RouteMetric, InterfaceMetric | Select-Object -First 1 -ExpandProperty InterfaceIndex)
+    $lanIp = (Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex $ifIndex -ErrorAction Stop |
+              Select-Object -First 1 -ExpandProperty IPAddress)
+} catch { }
+if (-not $lanIp) {
+    $lanIp = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+              Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' -and $_.IPAddress -notlike '172.*' -and $_.PrefixOrigin -ne 'WellKnown' } |
+              Select-Object -First 1 -ExpandProperty IPAddress)
+}
 
 Write-Host ""
 Write-Host "Stack is starting (MariaDB needs ~30 s on the very first run)." -ForegroundColor Green
