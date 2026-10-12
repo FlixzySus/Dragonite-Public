@@ -117,7 +117,7 @@ if (-not (Test-Path $rotomCfg)) {
 # Bind-mount targets must exist as the right type before compose starts, otherwise
 # Docker creates them as directories and the containers fail to start.
 New-Item -ItemType Directory -Force -Path `
-    'dragonite\logs', 'mariadb\data', 'golbat\cache', 'golbat\logs', 'rotom\logs', 'rotom\jobs' | Out-Null
+    'dragonite\logs', 'golbat\cache', 'golbat\logs', 'rotom\logs', 'rotom\jobs' | Out-Null
 
 if ($NoStart) {
     Write-Host "Done (-NoStart). Review .env, dragonite\config.toml and rotom\config\local.json, then run: docker compose up -d" -ForegroundColor Green

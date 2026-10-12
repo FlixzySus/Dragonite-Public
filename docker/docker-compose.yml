@@ -31,7 +31,9 @@ services:
       - --max-connections=500
       - --innodb-buffer-pool-size=${DB_BUFFER_POOL:-1G}
     volumes:
-      - ./mariadb/data:/var/lib/mysql
+      # Named volume, NOT a bind mount: InnoDB on a Windows-shared folder fails with
+      # "Got error N from storage engine" during ALTER TABLE (Koji migrations, Golbat schema).
+      - mariadb_data:/var/lib/mysql
       - ./mariadb/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
@@ -175,3 +177,6 @@ services:
       - ADMIN.BACKENDS.0.GOLBAT_API_SECRET=${GOLBAT_API_SECRET}
     ports:
       - "${ADMIN_PORT:-7273}:7273"
+
+volumes:
+  mariadb_data:

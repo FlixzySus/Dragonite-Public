@@ -75,9 +75,13 @@ D:\PogoMapper\Dragonite-Public\docker\
 │   ├── cache\
 │   └── logs\
 └── mariadb\
-    ├── init\01-create-databases.sh <- creates golbat + koji DBs on first start
-    └── data\                       <- database files, gitignored
+    └── init\01-create-databases.sh <- creates golbat + koji DBs on first start
 ```
+
+The database files themselves live in a Docker **named volume** (`docker_mariadb_data`),
+not in this folder. InnoDB does not work reliably on a Windows-shared bind mount
+(you get `Got error N from storage engine` during `ALTER TABLE`), and a volume is
+much faster. `docker volume ls` shows it; it survives `docker compose down`.
 
 ## 4. First-time configuration (in this order)
 
@@ -141,12 +145,25 @@ docker compose up -d                  # start again
 - **Want to reach MariaDB from HeidiSQL/DBeaver** — uncomment the `ports:` block
   under `mariadb` in `docker-compose.yml`, `docker compose up -d`, connect to
   `localhost:3306` with `DB_USER` / `DB_PASSWORD` from `.env`.
+- **Koji: `500 Server Error … Unknown column 'geofence.parent'`, or Koji log says
+  `Migration Error … Got error 41 from storage engine InnoDB` / `Duplicate column
+  name 'geometry'`** — MariaDB's data directory was on a Windows bind mount (older
+  version of this compose file) and an `ALTER TABLE` half-applied. Koji logs the
+  failure and keeps running with a broken schema, so it never recovers on its own.
+  Fix: `git pull`, then wipe the database and start fresh (see **Start over**);
+  the current compose file keeps the data in a named volume where this can't happen.
 - **Changed `DB_*` or `*_DB_NAME` in `.env` after first start** — the init script
-  only runs on an empty data dir, so the change won't apply. Either edit the DB by
-  hand or start over.
-- **Start over** — `docker compose down`, delete `mariadb\data`, `.env`,
-  `dragonite\config.toml` and `rotom\config\local.json`, run `.\setup.ps1` again.
-  **This wipes all databases.**
+  only runs on an empty database volume, so the change won't apply. Either edit the
+  DB by hand or start over.
+- **Start over (wipes all databases)** —
+  ```powershell
+  docker compose down -v          # -v deletes the mariadb_data volume
+  Remove-Item -Recurse -Force .\mariadb\data -ErrorAction SilentlyContinue   # leftover from old bind-mount layout
+  docker compose up -d
+  docker compose logs koji | Select-String "Migration"      # expect "Migrations successful"
+  ```
+  Keep `.env` and the config files unless you also want new secrets; delete them
+  too and run `.\setup.ps1` for a completely clean slate.
 
 ## 7. Pinning versions
 
