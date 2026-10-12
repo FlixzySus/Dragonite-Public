@@ -6,9 +6,10 @@
 .DESCRIPTION
     - Checks that Docker Desktop is installed and running
     - Creates .env from .env.example with randomly generated passwords/secrets (first run only)
-    - Creates dragonite/config.toml from its example, wired to those secrets (first run only)
+    - Creates dragonite/config.toml and golbat/config.toml from their examples, wired to those secrets (first run only)
     - Creates rotom/config/local.json from its example (first run only)
     - Pulls the images and starts the stack
+    - Run .\check.ps1 afterwards to verify the database, migrations and services
 
     Safe to re-run: existing .env / config files are never overwritten.
 
@@ -105,7 +106,24 @@ if (-not (Test-Path $cfg)) {
     Write-Host "dragonite/config.toml already exists, keeping it." -ForegroundColor DarkGray
 }
 
-# --- 4. rotom/config/local.json ---------------------------------------------
+# --- 4. golbat/config.toml --------------------------------------------------
+$golbatCfg = Join-Path $PSScriptRoot 'golbat\config.toml'
+if (-not (Test-Path $golbatCfg)) {
+    Write-Host "Creating golbat/config.toml from example ..." -ForegroundColor Cyan
+    $toml = Get-Content -Raw 'golbat\config.toml.example'
+    $toml = $toml.Replace('__DB_USER__',             (Get-Or $dotenv.DB_USER 'dragonite'))
+    $toml = $toml.Replace('__DB_PASSWORD__',         $dotenv.DB_PASSWORD)
+    $toml = $toml.Replace('__GOLBAT_DB_NAME__',      (Get-Or $dotenv.GOLBAT_DB_NAME 'golbat'))
+    $toml = $toml.Replace('__GOLBAT_API_SECRET__',   $dotenv.GOLBAT_API_SECRET)
+    $toml = $toml.Replace('__GOLBAT_RAW_BEARER__',   $dotenv.GOLBAT_RAW_BEARER)
+    $toml = $toml.Replace('__KOJI_SECRET__',         $dotenv.KOJI_SECRET)
+    $toml = $toml.Replace('__KOJI_GOLBAT_PROJECT__', (Get-Or $dotenv.KOJI_GOLBAT_PROJECT 'golbat'))
+    [System.IO.File]::WriteAllText($golbatCfg, $toml, $utf8NoBom)
+} else {
+    Write-Host "golbat/config.toml already exists, keeping it." -ForegroundColor DarkGray
+}
+
+# --- 5. rotom/config/local.json ---------------------------------------------
 $rotomCfg = Join-Path $PSScriptRoot 'rotom\config\local.json'
 if (-not (Test-Path $rotomCfg)) {
     Write-Host "Creating rotom/config/local.json from example ..." -ForegroundColor Cyan
@@ -120,11 +138,11 @@ New-Item -ItemType Directory -Force -Path `
     'dragonite\logs', 'golbat\cache', 'golbat\logs', 'rotom\logs', 'rotom\jobs' | Out-Null
 
 if ($NoStart) {
-    Write-Host "Done (-NoStart). Review .env, dragonite\config.toml and rotom\config\local.json, then run: docker compose up -d" -ForegroundColor Green
+    Write-Host "Done (-NoStart). Review .env, dragonite\config.toml, golbat\config.toml and rotom\config\local.json, then run: docker compose up -d" -ForegroundColor Green
     exit 0
 }
 
-# --- 5. Pull + start ---------------------------------------------------------
+# --- 6. Pull + start ---------------------------------------------------------
 Write-Host "Pulling images (first time this downloads a few hundred MB) ..." -ForegroundColor Cyan
 docker compose pull
 if ($LASTEXITCODE -ne 0) { Write-Error "docker compose pull failed" }
@@ -152,5 +170,6 @@ if ($lanIp) {
 Write-Host "  Devices connect to Rotom at:  ws://${lanIp}:$devicePort"
 }
 Write-Host ""
-Write-Host "All secrets are in .env. Next steps are in README.md section 4."
-Write-Host "Logs: docker compose logs -f dragonite   (or golbat / koji / rotom / admin)"
+Write-Host "All secrets are in .env."
+Write-Host "Verify the database and services:  .\check.ps1   (wait ~60 s after first start)"
+Write-Host "Then follow README.md 'Next steps'. Logs: docker compose logs -f dragonite   (or golbat / koji / rotom / admin)"

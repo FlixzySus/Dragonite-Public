@@ -67,8 +67,8 @@ endpoint = "ws://rotom:7071"
 golbat_endpoint = "http://golbat:9001"
 golbat_raw_bearer = "__GOLBAT_RAW_BEARER__"
 golbat_api_secret = "__GOLBAT_API_SECRET__"
-# if this is present then dragonite will not send raws to the httpendpoint - not used for API, be careful if you use grpc you still need 'golbat_endpoint' for API calls to Golbat
-#golbat_grpc_endpoint = "golbat:50001"
+# Raws go to Golbat over gRPC (recommended by the Unown# docs); golbat_endpoint above is still used for API calls.
+golbat_grpc_endpoint = "golbat:50001"
 
 [logging]
 save = true

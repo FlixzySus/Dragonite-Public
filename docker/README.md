@@ -1,29 +1,34 @@
 # Unown# scanner stack on Windows with Docker Desktop
 
-This folder runs the **whole** scanner backend as containers, with one script:
+This folder is the [Unown# Docker setup](https://unownhash.com/docs/setup/docker) and
+[Database setup](https://unownhash.com/docs/other/database) packaged for Docker Desktop,
+plus Koji. One script creates every config with generated secrets, a second script
+proves the database and services are working. Follow the sections in order — it is the
+same order as the official docs.
 
-| Container | What it is | Web UI / port on your PC |
-|-----------|------------|--------------------------|
-| `mariadb` | one MariaDB server with the `dragonite`, `golbat` and `koji` databases | not published (see troubleshooting) |
-| `rotom` | device controller — your phones / emulators connect to it | UI <http://localhost:7072>, devices → `:7070` |
-| `golbat` | data processor — parses what the devices see, feeds maps/webhooks | API `:9001` |
+| Container | What it is | On your PC |
+|-----------|------------|------------|
+| `mariadb` | MariaDB 10.11 with the `dragonite`, `golbat` and `koji` databases | not published (see troubleshooting) |
+| `rotom` | device controller — MITM clients on phones connect to it | UI <http://localhost:7072>, devices → `:7070` |
+| `golbat` | data processor — parses what devices see, feeds maps/webhooks | API `:9001`, gRPC `:50001` |
 | `koji` | geofence / area manager — draw the areas to scan | UI <http://localhost:8080> |
-| `dragonite` | the scanner controller — tells devices where to go | API `:7272` |
-| `admin` | Dragonite's web UI — accounts, areas, workers, status | UI <http://localhost:7273> |
+| `dragonite` | scanner controller — tells devices where to go | API `:7272` |
+| `admin` | Dragonite's web UI — accounts, areas, proxies, workers | UI <http://localhost:7273> |
 
-No Linux shell, `jq` or `pm2` needed. The upstream `run.sh` in the repo root is for
-bare-metal Linux/macOS installs and does not work on Windows.
+The upstream `run.sh` in the repo root is for bare-metal Linux/macOS installs
+([Standard setup](https://unownhash.com/docs/setup/standard)) and does not work on Windows.
 
 ## 1. Prerequisites
 
 - Windows 10/11 64-bit with [Docker Desktop](https://www.docker.com/products/docker-desktop/)
-  installed and **running** (WSL2 backend, the default, is fine). Give it at least
-  4 GB RAM in *Settings → Resources* if you plan to scan more than a small area.
+  installed and **running** (WSL2 backend). Give it ≥ 4 GB RAM in *Settings → Resources*.
 - [Git for Windows](https://git-scm.com/download/win).
+- A MITM client for your devices (the Unown# docs list the supported ones under
+  [Rotom](https://unownhash.com/docs/rotom)); it is third-party and not part of this stack.
 
 ## 2. Clone into `D:\PogoMapper`
 
-Open **PowerShell** (not CMD):
+PowerShell (not CMD):
 
 ```powershell
 New-Item -ItemType Directory -Force D:\PogoMapper | Out-Null
@@ -32,144 +37,192 @@ git clone https://github.com/FlixzySus/Dragonite-Public.git
 cd Dragonite-Public\docker
 ```
 
-## 3. Run the setup script
+## 3. Database setup
+
+> "Make sure to have a functional Database Setup prior to starting the Unown# installation."
+> — <https://unownhash.com/docs>
+
+The docs want MariaDB 10.6+ (10.11 used here), `utf8mb4` / `utf8mb4_unicode_ci`, and one
+database each for Dragonite and Golbat. `docker-compose.yml` implements exactly that:
+
+- `mariadb:10.11` started with the docs' server flags
+  (`--character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci --binlog-expire-logs-seconds=86400`).
+- `mariadb/init/01-create-databases.sh` runs **once, on the first start**, and creates the
+  `golbat` and `koji` databases next to `dragonite`, all `utf8mb4_unicode_ci`, and grants the
+  app user (`DB_USER` in `.env`) on all three. The docs do this step by hand in TablePlus /
+  Workbench; here it is automated.
+- Data lives in a Docker **named volume** (`docker_mariadb_data`), not in this folder. InnoDB
+  does not work on a Windows-shared bind mount (`Got error N from storage engine` during
+  `ALTER TABLE`), and the volume is much faster. `docker volume ls` shows it; it survives
+  `docker compose down`.
+- Optional tuning per the docs' *Optimizing MariaDB* section: create `mariadb\my.cnf` and
+  uncomment the matching volume line in `docker-compose.yml`. Scale the values to your PC
+  (the docs' example is for a 128 GB server); `DB_BUFFER_POOL` in `.env` already sets the
+  buffer pool.
+
+You start it together with everything else in the next step and **verify it in step 5**.
+
+## 4. Install and start the services
 
 ```powershell
 .\setup.ps1
 ```
 
-If PowerShell refuses to run scripts, allow it for this one session only:
+If PowerShell refuses to run scripts: `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass` first.
 
-```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-.\setup.ps1
-```
+What it does (each file only if it does not exist yet, so re-running is safe):
 
-The script will:
+1. checks Docker Desktop is up;
+2. `.env` ← `.env.example` with **random** DB passwords, admin password/JWT secret,
+   Golbat `api_secret` + `raw_bearer`, Koji secret;
+3. `dragonite\config.toml` ← its example, wired to `mariadb`, `rotom:7071`, `golbat:9001`
+   (API) + `golbat:50001` (gRPC raws, as the docs recommend), `koji:8080`, with the secrets;
+4. `golbat\config.toml` ← its example, wired to `mariadb:3306` and the Koji project URL;
+5. `rotom\config\local.json` ← its example (`client.host` = `0.0.0.0` so the UI is reachable);
+6. `docker compose pull` + `docker compose up -d`;
+7. prints every URL and login.
 
-1. check Docker Desktop is up,
-2. create `.env` with **randomly generated** passwords and secrets for everything,
-3. create `dragonite\config.toml` and `rotom\config\local.json` from their examples,
-   already wired to the other containers and to those secrets,
-4. `docker compose pull` + `docker compose up -d`,
-5. print every URL and login.
-
-It never overwrites an existing `.env` or config file, so re-running is safe.
-Use `.\setup.ps1 -NoStart` if you want to edit the files before the first start.
+Use `.\setup.ps1 -NoStart` to generate the files and review them before the first start.
 
 Result on disk:
 
 ```
 D:\PogoMapper\Dragonite-Public\docker\
 ├── docker-compose.yml
-├── setup.ps1
+├── setup.ps1 / check.ps1
 ├── .env                            <- generated, gitignored, ALL secrets live here
-├── dragonite\
-│   ├── config.toml                 <- generated, gitignored
-│   └── logs\
-├── rotom\
-│   ├── config\local.json           <- generated, gitignored
-│   ├── logs\
-│   └── jobs\
-├── golbat\
-│   ├── cache\
-│   └── logs\
-└── mariadb\
-    └── init\01-create-databases.sh <- creates golbat + koji DBs on first start
+├── dragonite\config.toml           <- generated, gitignored      + logs\
+├── golbat\config.toml              <- generated, gitignored      + cache\ logs\
+├── rotom\config\local.json         <- generated, gitignored      + logs\ jobs\
+└── mariadb\init\01-create-databases.sh
 ```
 
-The database files themselves live in a Docker **named volume** (`docker_mariadb_data`),
-not in this folder. InnoDB does not work reliably on a Windows-shared bind mount
-(you get `Got error N from storage engine` during `ALTER TABLE`), and a volume is
-much faster. `docker volume ls` shows it; it survives `docker compose down`.
+## 5. Verify the database and services
 
-## 4. First-time configuration (in this order)
+Wait ~60 s after the first start (MariaDB initialises, then each service creates its tables), then:
 
-Everything below happens in the web UIs; no files to edit.
+```powershell
+.\check.ps1
+```
 
-1. **Koji** — <http://localhost:8080>, password = `KOJI_SECRET` from `.env`.
-   - Draw or import the geofence(s) you want to scan.
-   - Create a **project** named `golbat` (or whatever `KOJI_GOLBAT_PROJECT` is in
-     `.env`) and assign your geofences to it. Golbat reloads areas from that project.
-   - Create a second project for Dragonite (e.g. `dragonite`) with the same fences;
-     Dragonite pulls its areas from Koji projects via the Admin UI.
-   - Optional: set `KOJI_START_LAT` / `KOJI_START_LON` in `.env` so the map opens on
-     your town, then `docker compose up -d koji`.
-2. **Dragonite Admin** — <http://localhost:7273>, login from `.env`.
-   - *Accounts*: import your PTC/NK accounts.
-   - *Areas*: import from Koji, enable the modes you want (pokemon, quests, forts…).
-   - Restart Dragonite after enabling an auth provider in `dragonite\config.toml`
-     (`[auth.ptc] enable = true` / `[auth.nk]`): `docker compose restart dragonite`.
-3. **Devices** — point your phones / emulators at Rotom:
-   `ws://<your PC's LAN IP>:7070` (the setup script prints it). They show up in the
-   Rotom UI <http://localhost:7072> and then in Dragonite Admin → Workers.
-   Windows Firewall will ask to allow Docker on first inbound connection — allow it
-   on *Private* networks.
-4. **A map / notifier** (ReactMap, Poracle, …) is *not* included. Point it at the
-   Golbat API `http://localhost:9001` with `GOLBAT_API_SECRET`, or add it as a
-   webhook consumer under `golbat.environment` in `docker-compose.yml`
-   (commented example is there).
+It prints PASS/FAIL for: Docker running · all six containers running · MariaDB healthy ·
+login with the `.env` credentials · the three databases exist with `utf8mb4_unicode_ci` ·
+each has tables (= its service's migrations ran) · grants · Dragonite "Migration completed" ·
+Golbat migration clean · Koji "Migrations successful" · every published port listening.
+Every FAIL comes with the command to look at. **Do not continue until it is all green.**
 
-Dragonite logs *"connected to rotom"* and *"golbat … ok"* once everything is wired.
+## 6. Next steps (https://unownhash.com/docs/setup/next-steps)
 
-## 5. Day-to-day
+Everything below happens in the web UIs.
+
+### 6.1 Accounts — Dragonite Admin
+
+1. `dragonite\config.toml` → set `enable = true` under `[auth.ptc]` and/or `[auth.nk]`
+   (at least one provider must be enabled), then `docker compose restart dragonite`.
+   The other keys in that block (`login_delay`, `remote_auth_url`, `token_*`) are described in
+   the [Dragonite config docs](https://unownhash.com/docs/dragonite/config).
+2. <http://localhost:7273> (login in `.env`) → **Accounts** → add one or batch-import, one
+   per line `username,password`, with the matching provider.
+
+### 6.2 Proxies — Dragonite Admin
+
+The docs: "required if you have more than one or two devices". **Proxies** →
+`http://USERNAME:PASSWORD@HOST:PORT`, one per line. Dragonite logs in through them itself;
+no HAProxy/Squid needed.
+
+### 6.3 Koji — areas and routes
+
+<http://localhost:8080>, password = `KOJI_SECRET`. Dragonite's and Golbat's configs are already
+pointed at Koji; you only need projects and a fence
+([Koji docs — Dragonite quick start](https://koji.vercel.app/client/getting-started#dragonite-quick-start)):
+
+1. **Admin → Projects → Create** twice:
+
+   | | Name | Scanner | API Endpoint | API Key |
+   |---|---|---|---|---|
+   | Dragonite | `dragonite` | **on** | `http://dragonite:7272/reload` | *(empty)* |
+   | Golbat | `golbat` (= `KOJI_GOLBAT_PROJECT` in `.env`) | off | `http://golbat:9001/api/reload-geojson` | `x-golbat-secret:<GOLBAT_API_SECRET>` |
+
+2. **Map** → draw a polygon (or Import Wizard → Nominatim / GeoJSON) → name it → save to Kōji.
+   Start small; a few km² is plenty for a first run.
+3. **Admin → Geofences** → edit → **Projects** → tick both → Save.
+4. **Map** → Import from Kōji → load the fence → **Calculations**: Mode *Bootstrap*, Strategy
+   *Radius*, Radius *70*, Save to Kōji Db ✔, Save to Scanner Db ✔, Skip rendering ✔ → **Update**.
+5. **Admin → Geofences → Sync** the fence; **Admin → Routes → Sync** the route.
+6. `docker compose restart golbat` (or Admin → Projects → Sync `golbat`) so Golbat loads the fence.
+
+Dragonite Admin → **Areas** now lists the fence with a route. Open it: Enabled, Pokemon mode
+with the bootstrap route, workers = number of devices, Quest/Fort off for now.
+
+### 6.4 Devices — MITM client
+
+Point each device's MITM client at Rotom: `ws://<your PC's LAN IPv4>:7070`
+(`ipconfig`; `setup.ps1` prints it), Rotom secret empty (matches `rotom\config\local.json`).
+Windows Firewall will ask on the first inbound connection — allow Docker Desktop on **Private**
+networks, or add the rule yourself:
+
+```powershell
+New-NetFirewallRule -DisplayName "Rotom devices 7070" -Direction Inbound -Protocol TCP -LocalPort 7070 -Action Allow -Profile Private
+```
+
+Devices appear in Rotom (<http://localhost:7072>), then in Dragonite Admin → **Workers**, and
+the area starts getting jobs. Once the bootstrap has run a day, replace the route in Koji with
+*Cluster / Spawnpoint / Radius 70 / Sort TSP* (and a *Pokestop* route for quests) and sync again.
+
+## 7. Day-to-day
 
 ```powershell
 cd D:\PogoMapper\Dragonite-Public\docker
 
-docker compose ps                     # what's running / health
+docker compose ps                     # health
+.\check.ps1                           # full verification any time
 docker compose logs -f dragonite      # follow a service (dragonite / golbat / koji / rotom / admin)
-docker compose restart dragonite      # after editing dragonite\config.toml
+docker compose restart dragonite      # after editing dragonite\config.toml (golbat likewise)
 docker compose down                   # stop everything (data is kept)
 docker compose up -d                  # start again
 
 .\setup.ps1 -Update                   # pull latest images for everything + recreate
 ```
 
-## 6. Troubleshooting
+## 8. Troubleshooting
 
-- **`docker: error during connect` / "pipe not found"** — Docker Desktop isn't
-  running. Start it and wait until the tray icon stops animating.
-- **Containers restart in a loop right after first start** — MariaDB is still
-  initialising (~30 s). `docker compose ps` shows `mariadb` as `healthy` when done;
-  Dragonite/Golbat/Koji wait for that automatically.
-- **Golbat log: can't fetch Koji geofences / 404** — the Koji project named in
-  `KOJI_GOLBAT_PROJECT` doesn't exist yet (step 4.1). Golbat keeps running and
-  retries.
-- **Koji log: table doesn't exist** — Golbat hasn't finished creating its tables
-  yet. Harmless on first boot; `docker compose restart koji` if it persists.
-- **Devices can't connect to Rotom** — use the PC's LAN IP, not `localhost`; allow
-  Docker through Windows Firewall; check `ROTOM_DEVICE_PORT` isn't changed in `.env`.
-- **Port already in use** — change the matching `*_PORT` in `.env`, then
-  `docker compose up -d`.
-- **Want to reach MariaDB from HeidiSQL/DBeaver** — uncomment the `ports:` block
-  under `mariadb` in `docker-compose.yml`, `docker compose up -d`, connect to
-  `localhost:3306` with `DB_USER` / `DB_PASSWORD` from `.env`.
+- **`docker: error during connect` / "pipe not found"** — Docker Desktop isn't running.
+- **Docker Desktop itself fails with `wsl-bootstrap … mkfs … No such device`** — the WSL data
+  disk could not be attached. `wsl --update`, `wsl --shutdown`, confirm *Virtual Machine
+  Platform* is enabled, then `wsl --unregister docker-desktop` and relaunch Docker Desktop.
+- **Containers restart in a loop right after first start** — MariaDB is still initialising
+  (~30 s). `docker compose ps` shows `mariadb` as `healthy` when done.
+- **`check.ps1` says a database is missing** — the init script only runs on an empty volume:
+  `docker compose down -v` then `docker compose up -d`.
 - **Koji: `500 Server Error … Unknown column 'geofence.parent'`, or Koji log says
-  `Migration Error … Got error 41 from storage engine InnoDB` / `Duplicate column
-  name 'geometry'`** — MariaDB's data directory was on a Windows bind mount (older
-  version of this compose file) and an `ALTER TABLE` half-applied. Koji logs the
-  failure and keeps running with a broken schema, so it never recovers on its own.
-  Fix: `git pull`, then wipe the database and start fresh (see **Start over**);
-  the current compose file keeps the data in a named volume where this can't happen.
-- **Changed `DB_*` or `*_DB_NAME` in `.env` after first start** — the init script
-  only runs on an empty database volume, so the change won't apply. Either edit the
-  DB by hand or start over.
+  `Migration Error … Got error 41 from storage engine InnoDB` / `Duplicate column name
+  'geometry'`** — MariaDB's data directory was on a Windows bind mount (older version of this
+  compose file) and an `ALTER TABLE` half-applied. Koji logs the failure and keeps running with
+  a broken schema, so it never recovers on its own. `git pull`, then **Start over**.
+- **Golbat log: can't fetch Koji geofences / 404** — the Koji project named in
+  `KOJI_GOLBAT_PROJECT` doesn't exist yet (step 6.3). Golbat keeps running and retries.
+- **Devices can't connect to Rotom** — use the PC's LAN IP, not `localhost`; allow Docker
+  through Windows Firewall; same Wi-Fi (not a guest network).
+- **Port already in use** — change the matching `*_PORT` in `.env`, then `docker compose up -d`.
+- **Reach MariaDB from HeidiSQL / DBeaver / TablePlus** — uncomment the `ports:` block under
+  `mariadb` in `docker-compose.yml`, `docker compose up -d`, connect to `localhost:3306` with
+  `DB_USER` / `DB_PASSWORD` from `.env`.
+- **Changed `DB_*` or `*_DB_NAME` in `.env` after first start** — won't apply to the existing
+  volume; edit the DB by hand or start over.
 - **Start over (wipes all databases)** —
   ```powershell
   docker compose down -v          # -v deletes the mariadb_data volume
-  Remove-Item -Recurse -Force .\mariadb\data -ErrorAction SilentlyContinue   # leftover from old bind-mount layout
   docker compose up -d
-  docker compose logs koji | Select-String "Migration"      # expect "Migrations successful"
+  Start-Sleep 60; .\check.ps1
   ```
-  Keep `.env` and the config files unless you also want new secrets; delete them
-  too and run `.\setup.ps1` for a completely clean slate.
+  Keep `.env` and the config files unless you also want new secrets; delete them too and run
+  `.\setup.ps1` for a completely clean slate.
 
-## 7. Pinning versions
+## 9. Pinning versions
 
-`docker-compose.yml` tracks `:latest` for Dragonite/Admin and `:main` for Rotom,
-Golbat and Koji (their upstream defaults). To pin or test a build, change the
-`image:` tag and run `docker compose up -d`:
+`docker-compose.yml` tracks `:latest` for Dragonite/Admin and `:main` for Rotom, Golbat and Koji
+(their upstream defaults). To pin or test a build, change the `image:` tag and run
+`docker compose up -d`:
 
 - <https://github.com/UnownHash/Dragonite-Public/pkgs/container/dragonite-public>
 - <https://github.com/UnownHash/Golbat/pkgs/container/golbat>

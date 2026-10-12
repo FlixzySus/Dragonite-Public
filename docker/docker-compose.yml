@@ -1,22 +1,24 @@
 
-# Full Unown# scanner stack for Docker Desktop (Windows / macOS / Linux):
-#   MariaDB  - one server, three databases (dragonite, golbat, koji)
-#   Rotom    - device controller: phones connect to :7070, web UI on :7072
-#   Golbat   - data processor / raw parser, API on :9001
-#   Koji     - geofence & area manager, web UI on :8080
-#   Dragonite + Admin - the scanner controller and its web UI on :7273
+# Unown# scanner stack for Docker Desktop (Windows / macOS / Linux), following
+# https://unownhash.com/docs/setup/docker and https://unownhash.com/docs/other/database
 #
-# First run:  .\setup.ps1   (creates .env, dragonite/config.toml, rotom/config/local.json with generated secrets)
-# Start:      docker compose up -d
+#   mariadb  - MariaDB 10.11 (docs: 10.6+ recommended), three databases: dragonite, golbat, koji
+#   rotom    - device controller: devices -> :7070, controllers -> :7071, web UI :7072
+#   golbat   - data processor, HTTP API :9001, gRPC raw ingest :50001
+#   koji     - geofence / area manager, web UI :8080
+#   dragonite + admin - scanner controller (:7272) and its web UI (:7273)
+#
+# First run:  .\setup.ps1      (creates .env + all config files with generated secrets, then starts)
+# Verify:     .\check.ps1      (database, migrations, services, ports)
 # Logs:       docker compose logs -f dragonite
-# Update:     .\setup.ps1 -Update   (= docker compose pull && docker compose up -d)
+# Update:     .\setup.ps1 -Update
 #
-# Containers talk to each other by service name (mariadb, rotom, golbat, koji, dragonite).
-# Only the published ports below are reachable from your PC / LAN.
+# Containers reach each other by service name (mariadb, rotom, golbat, koji, dragonite) on the
+# "scanner" network. Other compose projects (ReactMap, Poracle, ...) can join that network by name.
 
 services:
   mariadb:
-    image: mariadb:11
+    image: mariadb:10.11
     container_name: mariadb
     restart: unless-stopped
     environment:
@@ -27,7 +29,13 @@ services:
       # extra databases created by mariadb/init/01-create-databases.sh on first start
       GOLBAT_DB_NAME: ${GOLBAT_DB_NAME:-golbat}
       KOJI_DB_NAME: ${KOJI_DB_NAME:-koji}
+    # Server flags from the Unown# database docs, plus sizing. (The docs also pass
+    # --default-authentication-plugin; that is a MySQL option, MariaDB already uses
+    # mysql_native_password for these users.)
     command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --binlog-expire-logs-seconds=86400
       - --max-connections=500
       - --innodb-buffer-pool-size=${DB_BUFFER_POOL:-1G}
     volumes:
@@ -35,13 +43,15 @@ services:
       # "Got error N from storage engine" during ALTER TABLE (Koji migrations, Golbat schema).
       - mariadb_data:/var/lib/mysql
       - ./mariadb/init:/docker-entrypoint-initdb.d:ro
+      # Optional tuning file, see "Optimizing MariaDB" in the Unown# database docs:
+      # - ./mariadb/my.cnf:/etc/mysql/conf.d/my.cnf:ro
     healthcheck:
       test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
       interval: 10s
       timeout: 5s
       retries: 10
       start_period: 30s
-    # Uncomment to reach the DB from tools on the host (HeidiSQL, DBeaver, ...)
+    # Uncomment to reach the DB from tools on the host (HeidiSQL, DBeaver, TablePlus, ...)
     # ports:
     #   - "3306:3306"
 
@@ -56,9 +66,9 @@ services:
       - ./rotom/logs:/rotom/logs
       - ./rotom/jobs:/rotom/jobs
     ports:
-      - "${ROTOM_DEVICE_PORT:-7070}:7070"      # phones / emulators connect here
+      - "${ROTOM_DEVICE_PORT:-7070}:7070"      # phones / MITM clients connect here
       - "${ROTOM_CONTROLLER_PORT:-7071}:7071"  # controllers (dragonite); exposed for non-docker controllers
-      - "${ROTOM_UI_PORT:-7072}:7072"          # web UI
+      - "${ROTOM_UI_PORT:-7072}:7072"          # web UI (no auth - keep on your LAN)
 
   golbat:
     image: ghcr.io/unownhash/golbat:main
@@ -67,48 +77,15 @@ services:
     depends_on:
       mariadb:
         condition: service_healthy
-    environment:
-      # see https://github.com/UnownHash/Golbat/blob/main/config.toml.example for every option
-      - GOLBAT.PORT=9001
-      - GOLBAT.GRPC_PORT=50001
-      - GOLBAT.RAW_BEARER=${GOLBAT_RAW_BEARER}
-      - GOLBAT.API_SECRET=${GOLBAT_API_SECRET}
-      - GOLBAT.POKEMON_MEMORY_ONLY=true
-
-      - GOLBAT.KOJI.URL=http://koji:8080/api/v1/geofence/feature-collection/${KOJI_GOLBAT_PROJECT:-golbat}
-      - GOLBAT.KOJI.BEARER_TOKEN=${KOJI_SECRET}
-
-      - GOLBAT.CLEANUP.POKEMON=true
-      - GOLBAT.CLEANUP.INCIDENTS=true
-      - GOLBAT.CLEANUP.QUESTS=true
-      - GOLBAT.CLEANUP.STATS=true
-      - GOLBAT.CLEANUP.STATS_DAYS=7
-      - GOLBAT.CLEANUP.DEVICE_HOURS=24
-
-      - GOLBAT.LOGGING.DEBUG=false
-      - GOLBAT.LOGGING.SAVE_LOGS=true
-      - GOLBAT.LOGGING.MAX_SIZE=50
-      - GOLBAT.LOGGING.MAX_BACKUPS=10
-      - GOLBAT.LOGGING.MAX_AGE=30
-      - GOLBAT.LOGGING.COMPRESS=true
-
-      - GOLBAT.DATABASE.USER=${DB_USER:-dragonite}
-      - GOLBAT.DATABASE.PASSWORD=${DB_PASSWORD}
-      - GOLBAT.DATABASE.ADDRESS=mariadb:3306
-      - GOLBAT.DATABASE.DB=${GOLBAT_DB_NAME:-golbat}
-      - GOLBAT.DATABASE.MAX_POOL=100
-
-      - GOLBAT.PVP.ENABLED=true
-      - GOLBAT.PVP.INCLUDE_HUNDOS_UNDER_CAP=false
-
-      # Add webhook consumers (Poracle, ReactMap, ...) here once you have them, e.g.
-      # - GOLBAT.WEBHOOKS.0.URL=http://host.docker.internal:4201
-      # - GOLBAT.WEBHOOKS.0.TYPES=pokemon,gym,invasion,quest,pokestop,raid
     volumes:
+      - type: bind
+        source: ./golbat/config.toml
+        target: /golbat/config.toml
       - ./golbat/cache:/golbat/cache
       - ./golbat/logs:/golbat/logs
     ports:
-      - "${GOLBAT_PORT:-9001}:9001"
+      - "${GOLBAT_PORT:-9001}:9001"            # HTTP API + raw endpoint (maps, Koji, admin)
+      - "${GOLBAT_GRPC_PORT:-50001}:50001"     # gRPC raw ingest (dragonite uses this internally)
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
@@ -180,3 +157,7 @@ services:
 
 volumes:
   mariadb_data:
+
+networks:
+  default:
+    name: scanner
