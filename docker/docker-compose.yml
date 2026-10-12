@@ -1,27 +1,38 @@
 
-# Dragonite + Admin + MariaDB for Docker Desktop (Windows / macOS / Linux).
+# Full Unown# scanner stack for Docker Desktop (Windows / macOS / Linux):
+#   MariaDB  - one server, three databases (dragonite, golbat, koji)
+#   Rotom    - device controller: phones connect to :7070, web UI on :7072
+#   Golbat   - data processor / raw parser, API on :9001
+#   Koji     - geofence & area manager, web UI on :8080
+#   Dragonite + Admin - the scanner controller and its web UI on :7273
 #
-# First run:  copy .env.example -> .env and dragonite/config.toml.example -> dragonite/config.toml
-#             (or just run ./setup.ps1 on Windows, which does this for you and generates secrets)
+# First run:  .\setup.ps1   (creates .env, dragonite/config.toml, rotom/config/local.json with generated secrets)
 # Start:      docker compose up -d
 # Logs:       docker compose logs -f dragonite
-# Update:     docker compose pull && docker compose up -d
+# Update:     .\setup.ps1 -Update   (= docker compose pull && docker compose up -d)
+#
+# Containers talk to each other by service name (mariadb, rotom, golbat, koji, dragonite).
+# Only the published ports below are reachable from your PC / LAN.
 
 services:
   mariadb:
     image: mariadb:11
-    container_name: dragonite-mariadb
+    container_name: mariadb
     restart: unless-stopped
     environment:
       MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
       MARIADB_DATABASE: ${DB_NAME:-dragonite}
       MARIADB_USER: ${DB_USER:-dragonite}
       MARIADB_PASSWORD: ${DB_PASSWORD}
+      # extra databases created by mariadb/init/01-create-databases.sh on first start
+      GOLBAT_DB_NAME: ${GOLBAT_DB_NAME:-golbat}
+      KOJI_DB_NAME: ${KOJI_DB_NAME:-koji}
     command:
       - --max-connections=500
-      - --innodb-buffer-pool-size=512M
+      - --innodb-buffer-pool-size=${DB_BUFFER_POOL:-1G}
     volumes:
       - ./mariadb/data:/var/lib/mysql
+      - ./mariadb/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
       interval: 10s
@@ -32,6 +43,97 @@ services:
     # ports:
     #   - "3306:3306"
 
+  rotom:
+    image: ghcr.io/unownhash/rotom:main
+    container_name: rotom
+    restart: unless-stopped
+    volumes:
+      - type: bind
+        source: ./rotom/config/local.json
+        target: /rotom/config/local.json
+      - ./rotom/logs:/rotom/logs
+      - ./rotom/jobs:/rotom/jobs
+    ports:
+      - "${ROTOM_DEVICE_PORT:-7070}:7070"      # phones / emulators connect here
+      - "${ROTOM_CONTROLLER_PORT:-7071}:7071"  # controllers (dragonite); exposed for non-docker controllers
+      - "${ROTOM_UI_PORT:-7072}:7072"          # web UI
+
+  golbat:
+    image: ghcr.io/unownhash/golbat:main
+    container_name: golbat
+    restart: unless-stopped
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    environment:
+      # see https://github.com/UnownHash/Golbat/blob/main/config.toml.example for every option
+      - GOLBAT.PORT=9001
+      - GOLBAT.GRPC_PORT=50001
+      - GOLBAT.RAW_BEARER=${GOLBAT_RAW_BEARER}
+      - GOLBAT.API_SECRET=${GOLBAT_API_SECRET}
+      - GOLBAT.POKEMON_MEMORY_ONLY=true
+
+      - GOLBAT.KOJI.URL=http://koji:8080/api/v1/geofence/feature-collection/${KOJI_GOLBAT_PROJECT:-golbat}
+      - GOLBAT.KOJI.BEARER_TOKEN=${KOJI_SECRET}
+
+      - GOLBAT.CLEANUP.POKEMON=true
+      - GOLBAT.CLEANUP.INCIDENTS=true
+      - GOLBAT.CLEANUP.QUESTS=true
+      - GOLBAT.CLEANUP.STATS=true
+      - GOLBAT.CLEANUP.STATS_DAYS=7
+      - GOLBAT.CLEANUP.DEVICE_HOURS=24
+
+      - GOLBAT.LOGGING.DEBUG=false
+      - GOLBAT.LOGGING.SAVE_LOGS=true
+      - GOLBAT.LOGGING.MAX_SIZE=50
+      - GOLBAT.LOGGING.MAX_BACKUPS=10
+      - GOLBAT.LOGGING.MAX_AGE=30
+      - GOLBAT.LOGGING.COMPRESS=true
+
+      - GOLBAT.DATABASE.USER=${DB_USER:-dragonite}
+      - GOLBAT.DATABASE.PASSWORD=${DB_PASSWORD}
+      - GOLBAT.DATABASE.ADDRESS=mariadb:3306
+      - GOLBAT.DATABASE.DB=${GOLBAT_DB_NAME:-golbat}
+      - GOLBAT.DATABASE.MAX_POOL=100
+
+      - GOLBAT.PVP.ENABLED=true
+      - GOLBAT.PVP.INCLUDE_HUNDOS_UNDER_CAP=false
+
+      # Add webhook consumers (Poracle, ReactMap, ...) here once you have them, e.g.
+      # - GOLBAT.WEBHOOKS.0.URL=http://host.docker.internal:4201
+      # - GOLBAT.WEBHOOKS.0.TYPES=pokemon,gym,invasion,quest,pokestop,raid
+    volumes:
+      - ./golbat/cache:/golbat/cache
+      - ./golbat/logs:/golbat/logs
+    ports:
+      - "${GOLBAT_PORT:-9001}:9001"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  koji:
+    image: ghcr.io/turtiesocks/koji:main
+    container_name: koji
+    restart: unless-stopped
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      golbat:
+        condition: service_started
+    environment:
+      # Golbat database (forts / spawnpoints used for routing & clustering)
+      SCANNER_DB_URL: 'mysql://${DB_USER:-dragonite}:${DB_PASSWORD}@mariadb:3306/${GOLBAT_DB_NAME:-golbat}'
+      # Dragonite database
+      CONTROLLER_DB_URL: 'mysql://${DB_USER:-dragonite}:${DB_PASSWORD}@mariadb:3306/${DB_NAME:-dragonite}'
+      # Koji's own database
+      KOJI_DB_URL: 'mysql://${DB_USER:-dragonite}:${DB_PASSWORD}@mariadb:3306/${KOJI_DB_NAME:-koji}'
+      KOJI_SECRET: '${KOJI_SECRET}'
+      MAX_CONNECTIONS: 100
+      START_LAT: '${KOJI_START_LAT:-0}'
+      START_LON: '${KOJI_START_LON:-0}'
+      LOG_LEVEL: info
+    ports:
+      - "${KOJI_PORT:-8080}:8080"
+
   dragonite:
     image: ghcr.io/unownhash/dragonite-public:latest
     container_name: dragonite
@@ -39,17 +141,18 @@ services:
     depends_on:
       mariadb:
         condition: service_healthy
+      rotom:
+        condition: service_started
+      golbat:
+        condition: service_started
     volumes:
       - type: bind
         source: ./dragonite/config.toml
         target: /dragonite/config.toml
-      - type: bind
-        source: ./dragonite/logs
-        target: /dragonite/logs
+      - ./dragonite/logs:/dragonite/logs
     ports:
       - "${DRAGONITE_PORT:-7272}:7272"
     extra_hosts:
-      # lets config.toml point at services running directly on the host via host.docker.internal
       - "host.docker.internal:host-gateway"
 
   admin:
@@ -68,9 +171,7 @@ services:
       - ADMIN.GENERAL.JWT_SECRET=${ADMIN_JWT_SECRET}
 
       - ADMIN.BACKENDS.0.DRAGONITE_ENDPOINT=http://dragonite:7272
-      - ADMIN.BACKENDS.0.GOLBAT_ENDPOINT=${GOLBAT_ENDPOINT:-http://host.docker.internal:9001}
-      - ADMIN.BACKENDS.0.GOLBAT_API_SECRET=${GOLBAT_API_SECRET:-}
+      - ADMIN.BACKENDS.0.GOLBAT_ENDPOINT=http://golbat:9001
+      - ADMIN.BACKENDS.0.GOLBAT_API_SECRET=${GOLBAT_API_SECRET}
     ports:
       - "${ADMIN_PORT:-7273}:7273"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"

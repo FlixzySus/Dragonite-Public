@@ -1,20 +1,22 @@
 <#
 .SYNOPSIS
-    Bootstraps the Dragonite Docker stack (MariaDB + Dragonite + Admin) on Windows with Docker Desktop.
+    Bootstraps the full Unown# scanner stack (MariaDB, Rotom, Golbat, Koji, Dragonite, Admin)
+    on Windows with Docker Desktop.
 
 .DESCRIPTION
     - Checks that Docker Desktop is installed and running
     - Creates .env from .env.example with randomly generated passwords/secrets (first run only)
-    - Creates dragonite/config.toml from config.toml.example wired to those DB credentials (first run only)
+    - Creates dragonite/config.toml from its example, wired to those secrets (first run only)
+    - Creates rotom/config/local.json from its example (first run only)
     - Pulls the images and starts the stack
 
-    Safe to re-run: existing .env / config.toml are never overwritten.
+    Safe to re-run: existing .env / config files are never overwritten.
 
 .PARAMETER Update
     Pull the latest images and recreate the containers (what the README calls "Update").
 
 .PARAMETER NoStart
-    Only generate .env / config.toml, don't pull or start anything.
+    Only generate the config files, don't pull or start anything.
 
 .EXAMPLE
     PS D:\PogoMapper\Dragonite-Public\docker> .\setup.ps1
@@ -28,12 +30,13 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-Location -Path $PSScriptRoot
+$utf8NoBom = New-Object System.Text.UTF8Encoding $false
 
 function New-Secret {
     param([int]$Bytes = 24)
     $buf = New-Object byte[] $Bytes
     [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($buf)
-    # hex keeps it safe for .env, TOML and MariaDB without quoting headaches
+    # hex keeps it safe for .env, TOML, JSON, mysql:// URLs and MariaDB without quoting headaches
     return ($buf | ForEach-Object { $_.ToString('x2') }) -join ''
 }
 
@@ -46,6 +49,11 @@ function Read-DotEnv {
         }
     }
     return $map
+}
+
+function Get-Or {
+    param($Value, $Default)
+    if ([string]::IsNullOrEmpty($Value)) { return $Default } else { return $Value }
 }
 
 # --- 1. Docker Desktop -------------------------------------------------------
@@ -62,13 +70,20 @@ try {
 # --- 2. .env -----------------------------------------------------------------
 if (-not (Test-Path '.env')) {
     Write-Host "Creating .env with generated secrets ..." -ForegroundColor Cyan
-    $env_text = Get-Content -Raw '.env.example'
-    $env_text = $env_text -replace '(?m)^DB_ROOT_PASSWORD=.*$',  ("DB_ROOT_PASSWORD=" + (New-Secret))
-    $env_text = $env_text -replace '(?m)^DB_PASSWORD=.*$',       ("DB_PASSWORD=" + (New-Secret))
-    $env_text = $env_text -replace '(?m)^ADMIN_PASSWORD=.*$',    ("ADMIN_PASSWORD=" + (New-Secret -Bytes 9))
-    $env_text = $env_text -replace '(?m)^ADMIN_JWT_SECRET=.*$',  ("ADMIN_JWT_SECRET=" + (New-Secret -Bytes 32))
-    # Write without BOM so docker compose parses it cleanly
-    [System.IO.File]::WriteAllText((Join-Path $PSScriptRoot '.env'), $env_text, (New-Object System.Text.UTF8Encoding $false))
+    $envText = Get-Content -Raw '.env.example'
+    $generated = @{
+        DB_ROOT_PASSWORD  = New-Secret
+        DB_PASSWORD       = New-Secret
+        ADMIN_PASSWORD    = New-Secret -Bytes 9
+        ADMIN_JWT_SECRET  = New-Secret -Bytes 32
+        GOLBAT_API_SECRET = New-Secret
+        GOLBAT_RAW_BEARER = New-Secret
+        KOJI_SECRET       = New-Secret
+    }
+    foreach ($key in $generated.Keys) {
+        $envText = $envText -replace "(?m)^$key=.*$", "$key=$($generated[$key])"
+    }
+    [System.IO.File]::WriteAllText((Join-Path $PSScriptRoot '.env'), $envText, $utf8NoBom)
 } else {
     Write-Host ".env already exists, keeping it." -ForegroundColor DarkGray
 }
@@ -79,25 +94,38 @@ $cfg = Join-Path $PSScriptRoot 'dragonite\config.toml'
 if (-not (Test-Path $cfg)) {
     Write-Host "Creating dragonite/config.toml from example ..." -ForegroundColor Cyan
     $toml = Get-Content -Raw 'dragonite\config.toml.example'
-    $toml = $toml.Replace('__DB_USER__',     $(if ($dotenv.DB_USER) { $dotenv.DB_USER } else { 'dragonite' }))
-    $toml = $toml.Replace('__DB_PASSWORD__', $dotenv.DB_PASSWORD)
-    $toml = $toml.Replace('__DB_NAME__',     $(if ($dotenv.DB_NAME) { $dotenv.DB_NAME } else { 'dragonite' }))
-    [System.IO.File]::WriteAllText($cfg, $toml, (New-Object System.Text.UTF8Encoding $false))
+    $toml = $toml.Replace('__DB_USER__',           (Get-Or $dotenv.DB_USER 'dragonite'))
+    $toml = $toml.Replace('__DB_PASSWORD__',       $dotenv.DB_PASSWORD)
+    $toml = $toml.Replace('__DB_NAME__',           (Get-Or $dotenv.DB_NAME 'dragonite'))
+    $toml = $toml.Replace('__KOJI_SECRET__',       $dotenv.KOJI_SECRET)
+    $toml = $toml.Replace('__GOLBAT_API_SECRET__', $dotenv.GOLBAT_API_SECRET)
+    $toml = $toml.Replace('__GOLBAT_RAW_BEARER__', $dotenv.GOLBAT_RAW_BEARER)
+    [System.IO.File]::WriteAllText($cfg, $toml, $utf8NoBom)
 } else {
     Write-Host "dragonite/config.toml already exists, keeping it." -ForegroundColor DarkGray
 }
 
+# --- 4. rotom/config/local.json ---------------------------------------------
+$rotomCfg = Join-Path $PSScriptRoot 'rotom\config\local.json'
+if (-not (Test-Path $rotomCfg)) {
+    Write-Host "Creating rotom/config/local.json from example ..." -ForegroundColor Cyan
+    Copy-Item 'rotom\config\local.json.example' $rotomCfg
+} else {
+    Write-Host "rotom/config/local.json already exists, keeping it." -ForegroundColor DarkGray
+}
+
 # Bind-mount targets must exist as the right type before compose starts, otherwise
 # Docker creates them as directories and the containers fail to start.
-New-Item -ItemType Directory -Force -Path 'dragonite\logs', 'mariadb\data' | Out-Null
+New-Item -ItemType Directory -Force -Path `
+    'dragonite\logs', 'mariadb\data', 'golbat\cache', 'golbat\logs', 'rotom\logs', 'rotom\jobs' | Out-Null
 
 if ($NoStart) {
-    Write-Host "Done (-NoStart). Edit .env and dragonite/config.toml, then run: docker compose up -d" -ForegroundColor Green
+    Write-Host "Done (-NoStart). Review .env, dragonite\config.toml and rotom\config\local.json, then run: docker compose up -d" -ForegroundColor Green
     exit 0
 }
 
-# --- 4. Pull + start ---------------------------------------------------------
-Write-Host "Pulling images ..." -ForegroundColor Cyan
+# --- 5. Pull + start ---------------------------------------------------------
+Write-Host "Pulling images (first time this downloads a few hundred MB) ..." -ForegroundColor Cyan
 docker compose pull
 if ($LASTEXITCODE -ne 0) { Write-Error "docker compose pull failed" }
 
@@ -105,15 +133,24 @@ Write-Host ($(if ($Update) { "Recreating containers ..." } else { "Starting stac
 docker compose up -d
 if ($LASTEXITCODE -ne 0) { Write-Error "docker compose up failed" }
 
-$adminPort = if ($dotenv.ADMIN_PORT) { $dotenv.ADMIN_PORT } else { '7273' }
-$dragPort  = if ($dotenv.DRAGONITE_PORT) { $dotenv.DRAGONITE_PORT } else { '7272' }
+$adminPort  = Get-Or $dotenv.ADMIN_PORT '7273'
+$kojiPort   = Get-Or $dotenv.KOJI_PORT '8080'
+$rotomPort  = Get-Or $dotenv.ROTOM_UI_PORT '7072'
+$devicePort = Get-Or $dotenv.ROTOM_DEVICE_PORT '7070'
+$golbatPort = Get-Or $dotenv.GOLBAT_PORT '9001'
+$lanIp = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+          Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' -and $_.PrefixOrigin -ne 'WellKnown' } |
+          Select-Object -First 1 -ExpandProperty IPAddress)
 
 Write-Host ""
-Write-Host "Dragonite stack is up." -ForegroundColor Green
-Write-Host "  Admin UI:       http://localhost:$adminPort"
-Write-Host "  Admin login:    $($dotenv.ADMIN_USERNAME) / $($dotenv.ADMIN_PASSWORD)"
-Write-Host "  Dragonite API:  http://localhost:$dragPort"
+Write-Host "Stack is starting (MariaDB needs ~30 s on the very first run)." -ForegroundColor Green
+Write-Host "  Dragonite Admin:  http://localhost:$adminPort   login $($dotenv.ADMIN_USERNAME) / $($dotenv.ADMIN_PASSWORD)"
+Write-Host "  Koji:             http://localhost:$kojiPort   password $($dotenv.KOJI_SECRET)"
+Write-Host "  Rotom:            http://localhost:$rotomPort"
+Write-Host "  Golbat API:       http://localhost:$golbatPort   secret $($dotenv.GOLBAT_API_SECRET)"
+if ($lanIp) {
+Write-Host "  Devices connect to Rotom at:  ws://${lanIp}:$devicePort"
+}
 Write-Host ""
-Write-Host "Next: point [rotom], [koji] and [processors] in dragonite\config.toml at your Rotom / Koji / Golbat,"
-Write-Host "      set GOLBAT_ENDPOINT in .env, then run:  docker compose up -d"
-Write-Host "Logs: docker compose logs -f dragonite"
+Write-Host "All secrets are in .env. Next steps are in README.md section 4."
+Write-Host "Logs: docker compose logs -f dragonite   (or golbat / koji / rotom / admin)"

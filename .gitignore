@@ -4,4 +4,8 @@ dragonite/dragonite*
 docker/.env
 docker/dragonite/config.toml
 docker/dragonite/logs/
-docker/mariadb/
+docker/mariadb/data/
+docker/golbat/
+docker/rotom/logs/
+docker/rotom/jobs/
+docker/rotom/config/local.json

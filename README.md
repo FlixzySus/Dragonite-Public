@@ -4,8 +4,9 @@
 
 ## Setup (Windows / Docker Desktop)
 `run.sh` and the release binaries are Linux/macOS only. On Windows use the
-Docker Compose stack in [`docker/`](docker/README.md) — it includes MariaDB and a
-`setup.ps1` that generates the config and secrets for you.
+Docker Compose stack in [`docker/`](docker/README.md) — it brings up the whole
+scanner backend (MariaDB, Rotom, Golbat, Koji, Dragonite, Admin) and ships a
+`setup.ps1` that generates the configs and secrets for you.
 
 ## Setup (Non-Docker)
 1. Clone repo

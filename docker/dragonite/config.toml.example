@@ -2,12 +2,10 @@
 #
 # Differences from ../../dragonite/config.toml.example:
 #   - api_host is 0.0.0.0 so the admin container can reach the API
-#   - the database host is the "mariadb" compose service
-#   - Rotom / Golbat / Koji default to host.docker.internal (= a process on your Windows host).
-#     If they run as containers in the same compose project / network, use their service names.
+#   - mariadb / rotom / golbat / koji are the compose service names, all on the internal network
 #
-# setup.ps1 copies this file to config.toml and replaces __DB_USER__ / __DB_PASSWORD__ / __DB_NAME__
-# with the values from .env. If you copy it by hand, fill those in yourself.
+# setup.ps1 copies this file to config.toml and replaces every double-underscore placeholder (e.g. __DB_PASSWORD__) with the matching
+# value from .env. If you copy it by hand, fill those in yourself.
 
 [general]
 # Host and Port used for the Dragonite API (must be 0.0.0.0 inside Docker)
@@ -40,8 +38,8 @@ enable = false
 #token_refresh_only = true
 
 [koji]
-url = "http://host.docker.internal:8080"
-bearer_token = "KOJI_SECRET"
+url = "http://koji:8080"
+bearer_token = "__KOJI_SECRET__"
 
 #[prometheus]
 #enabled = true
@@ -60,16 +58,17 @@ bearer_token = "KOJI_SECRET"
 #leveling_level = 31 # used to stop leveling at certain level
 
 [rotom]
-endpoint = "ws://host.docker.internal:7071"
+endpoint = "ws://rotom:7071"
+# must match controllerListener.secret in ../rotom/config/local.json (empty by default)
 #secret = ""
 
 [processors]
 # Golbat Endpoint is singular - and will configure an endpoint for raw sending and API
-golbat_endpoint = "http://host.docker.internal:9001"
-golbat_raw_bearer = ""
-golbat_api_secret = ""
+golbat_endpoint = "http://golbat:9001"
+golbat_raw_bearer = "__GOLBAT_RAW_BEARER__"
+golbat_api_secret = "__GOLBAT_API_SECRET__"
 # if this is present then dragonite will not send raws to the httpendpoint - not used for API, be careful if you use grpc you still need 'golbat_endpoint' for API calls to Golbat
-#golbat_grpc_endpoint = "host.docker.internal:50001"
+#golbat_grpc_endpoint = "golbat:50001"
 
 [logging]
 save = true
